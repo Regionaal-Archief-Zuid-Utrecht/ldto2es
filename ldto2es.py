@@ -6,12 +6,17 @@ from urllib.parse import urljoin
 import logging
 import time
 from functools import lru_cache, wraps
+import dotenv
+from pathlib import Path
+
+# Load environment variables from .env file
+dotenv.load_dotenv()
 
 # Define namespaces
 LDTO = Namespace("https://data.razu.nl/def/ldto/")
 SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
 
-# Set up logging
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -295,6 +300,22 @@ def create_index(es, index_name, dekking_types, scheme_labels):
     )
     logger.info(f"Created index {index_name} with facet mapping")
 
+def create_elasticsearch_client():
+    """Create and configure Elasticsearch client"""
+    es_host = os.getenv('ES_HOST', 'es.digitopia.nl')
+    es_port = int(os.getenv('ES_PORT', '443'))
+    es_username = os.getenv('ES_USERNAME')
+    es_password = os.getenv('ES_PASSWORD')
+    
+    if not all([es_username, es_password]):
+        raise ValueError("ES_USERNAME and ES_PASSWORD must be set in .env file")
+    
+    return Elasticsearch(
+        f"https://{es_host}:{es_port}",
+        basic_auth=(es_username, es_password),
+        verify_certs=False
+    )
+
 def cache_uri_response(func):
     """Cache responses from URI dereferencing"""
     cache = {}
@@ -557,12 +578,8 @@ def convert_ttl_to_es(ttl_file):
     return documents, dekking_types, scheme_labels
 
 def index_documents(documents, index_name='ldto-objects'):
-    # Initialize Elasticsearch client with authentication
-    es = Elasticsearch(
-        "https://es.digitopia.nl",
-        basic_auth=("elastic", "search"),
-        verify_certs=False  # Note: In production, you should verify SSL certificates
-    )
+    # Create Elasticsearch client
+    es = create_elasticsearch_client()
     
     # Create index with proper mapping
     dekking_types = documents[1]
