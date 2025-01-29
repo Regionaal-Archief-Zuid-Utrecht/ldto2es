@@ -2,12 +2,17 @@ from rdflib import Graph, Namespace, URIRef
 from elasticsearch import Elasticsearch
 import os
 import requests
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, unquote
+from pdfminer.high_level import extract_text as pdf_extract_text
+from docx import Document
+from openpyxl import load_workbook
+import io
 import logging
 import time
 from functools import lru_cache, wraps
 import dotenv
 from pathlib import Path
+import argparse
 
 # Load environment variables from .env file
 dotenv.load_dotenv()
@@ -15,6 +20,7 @@ dotenv.load_dotenv()
 # Define namespaces
 LDTO = Namespace("https://data.razu.nl/def/ldto/")
 SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
+DCT = Namespace("http://purl.org/dc/terms/")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,9 +34,8 @@ def normalize_label(label):
     """Normalize a label to be used as a field name"""
     return label.lower().replace(' ', '_')
 
-@lru_cache(maxsize=1000)
-def get_skos_label(uri):
-    """Fetch SKOS prefLabel for a given URI. Results are cached using lru_cache."""
+def dereference_uri(uri):
+    """Dereference a URI and return a Graph with its content"""
     try:
         response = requests.get(uri, headers={'Accept': 'text/turtle'})
         if response.status_code == 429:  # Rate limit hit
@@ -44,96 +49,68 @@ def get_skos_label(uri):
         # Parse the response into a temporary graph
         temp_g = Graph()
         temp_g.parse(data=response.text, format='turtle')
-        
-        # Find the prefLabel
-        for _, _, label in temp_g.triples((URIRef(uri), SKOS.prefLabel, None)):
-            return str(label)
-            
-        logger.warning(f"No prefLabel found for {uri}")
-        return None
+        return temp_g
         
     except Exception as e:
-        logger.error(f"Error fetching skos:prefLabel for {uri}: {str(e)}")
+        logger.error(f"Error dereferencing {uri}: {str(e)}")
         return None
 
-def get_beperking_gebruik_labels(uri, g):
-    """Get the scheme and label for a beperkingGebruik URI by dereferencing the URIs"""
-    import requests
-    import time
-    
-    logger.info(f"Dereferencing URI: {uri}")
-    try:
-        # Get the beperking type label and scheme
-        response = requests.get(uri, headers={'Accept': 'text/turtle'})
-        if response.status_code == 429:
-            # Wait a bit and try again
-            time.sleep(1)
-            response = requests.get(uri, headers={'Accept': 'text/turtle'})
-            
-        if response.status_code != 200:
-            logger.warning(f"Failed to dereference {uri}: {response.status_code}")
-            return None
-            
-        # Parse the response into a temporary graph
-        temp_g = Graph()
-        temp_g.parse(data=response.text, format='turtle')
-        
-        # Get the prefLabel and inScheme
-        type_label = None
-        scheme_uri = None
-        
-        # Find the prefLabel for the type
-        for _, _, label in temp_g.triples((URIRef(uri), SKOS.prefLabel, None)):
-            type_label = str(label)
-            break
-            
-        # Find the scheme URI
-        for _, _, scheme in temp_g.triples((URIRef(uri), SKOS.inScheme, None)):
-            scheme_uri = str(scheme)
-            break
-            
-        if not type_label or not scheme_uri:
-            logger.warning(f"No type_label or scheme found for {uri}")
-            return None
-            
-        # Now dereference the scheme to get its label
-        logger.info(f"Dereferencing scheme: {scheme_uri}")
-        response = requests.get(scheme_uri, headers={'Accept': 'text/turtle'})
-        if response.status_code == 429:
-            # Wait a bit and try again
-            time.sleep(1)
-            response = requests.get(scheme_uri, headers={'Accept': 'text/turtle'})
-            
-        if response.status_code != 200:
-            logger.warning(f"Failed to dereference scheme {scheme_uri}: {response.status_code}")
-            return None
-            
-        # Parse the scheme response
-        temp_g = Graph()
-        temp_g.parse(data=response.text, format='turtle')
-        
-        # Get the scheme label
-        scheme_label = None
-        for _, _, label in temp_g.triples((URIRef(scheme_uri), SKOS.prefLabel, None)):
-            scheme_label = str(label)
-            break
-            
-        if not scheme_label:
-            logger.warning(f"No scheme label found for {scheme_uri}")
-            return None
-            
-        normalized = normalize_label(scheme_label)
-        logger.info(f"Found labels - scheme: {scheme_label} -> {normalized}, type: {type_label}")
-        
-        return {
-            'scheme': scheme_uri,
-            'scheme_label': normalized,
-            'type_label': type_label
-        }
-        
-    except Exception as e:
-        logger.error(f"Error dereferencing {uri}: {e}")
+def get_skos_triple_value(g, subject, predicate):
+    """Get a single value from a SKOS triple"""
+    for _, _, value in g.triples((URIRef(subject), predicate, None)):
+        return str(value)
+    return None
+
+@lru_cache(maxsize=1000)
+def get_skos_label(uri):
+    """Fetch SKOS prefLabel for a given URI. Results are cached using lru_cache."""
+    g = dereference_uri(uri)
+    if not g:
         return None
+        
+    label = get_skos_triple_value(g, uri, SKOS.prefLabel)
+    if not label:
+        logger.warning(f"No prefLabel found for {uri}")
+    return label
+
+@lru_cache(maxsize=1000)
+def get_beperking_gebruik_labels(uri):
+    """Get the scheme and label for a beperkingGebruik URI by dereferencing the URIs"""
+    logger.info(f"Dereferencing URI: {uri}")
+    
+    # Get the beperking type label and scheme
+    g = dereference_uri(uri)
+    if not g:
+        return None
+    
+    # Get the prefLabel and inScheme
+    type_label = get_skos_triple_value(g, uri, SKOS.prefLabel)
+    scheme_uri = get_skos_triple_value(g, uri, SKOS.inScheme)
+    
+    if not type_label or not scheme_uri:
+        logger.warning(f"No type_label or scheme found for {uri}")
+        return None
+    
+    # Now dereference the scheme to get its label
+    logger.info(f"Dereferencing scheme: {scheme_uri}")
+    scheme_g = dereference_uri(scheme_uri)
+    if not scheme_g:
+        return None
+    
+    # Get the scheme label
+    scheme_label = get_skos_triple_value(scheme_g, scheme_uri, SKOS.prefLabel)
+    if not scheme_label:
+        logger.warning(f"No scheme label found for {scheme_uri}")
+        return None
+    
+    normalized = normalize_label(scheme_label)
+    logger.info(f"Found labels - scheme: {scheme_label} -> {normalized}, type: {type_label}")
+    
+    return {
+        'scheme': scheme_uri,
+        'scheme_label': normalized,
+        'type_label': type_label
+    }
 
 def get_scheme_labels(g):
     """Get all unique scheme labels from beperkingGebruik URIs"""
@@ -149,7 +126,7 @@ def get_scheme_labels(g):
     
     for row in g.query(query):
         beperking_uri = str(row.beperking)
-        result = get_beperking_gebruik_labels(beperking_uri, g)
+        result = get_beperking_gebruik_labels(beperking_uri)
         if result and result['scheme_label']:
             scheme_labels[result['scheme']] = result['scheme_label']
     
@@ -179,6 +156,64 @@ def get_dekking_types(g):
     
     return dekking_types
 
+def extract_text_from_pdf(file_path):
+    """Extract text from a PDF file"""
+    try:
+        return pdf_extract_text(file_path)
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF {file_path}: {e}")
+        return None
+
+def extract_text_from_docx(file_path):
+    """Extract text from a DOCX file"""
+    try:
+        doc = Document(file_path)
+        return "\n".join([paragraph.text for paragraph in doc.paragraphs])
+    except Exception as e:
+        logger.error(f"Error extracting text from DOCX {file_path}: {e}")
+        return None
+
+def extract_text_from_xlsx(file_path):
+    """Extract text from an XLSX file"""
+    try:
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        texts = []
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            for row in ws.rows:
+                texts.extend(str(cell.value) for cell in row if cell.value)
+        return "\n".join(texts)
+    except Exception as e:
+        logger.error(f"Error extracting text from XLSX {file_path}: {e}")
+        return None
+
+def get_file_content(url):
+    """Get text content from a file in the docs directory"""
+    try:
+        # Extract filename from URL and decode it
+        filename = unquote(os.path.basename(urlparse(url).path))
+        file_path = os.path.join('docs', filename)
+        
+        if not os.path.exists(file_path):
+            logger.warning(f"File not found: {file_path}")
+            return None
+            
+        # Determine file type and extract text
+        ext = os.path.splitext(filename)[1].lower()
+        if ext == '.pdf':
+            return extract_text_from_pdf(file_path)
+        elif ext == '.docx':
+            return extract_text_from_docx(file_path)
+        elif ext == '.xlsx':
+            return extract_text_from_xlsx(file_path)
+        else:
+            logger.warning(f"Unsupported file type: {ext}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error processing file from URL {url}: {e}")
+        return None
+
 def create_index(es, index_name, dekking_types, scheme_labels):
     """Create Elasticsearch index with mapping for LDTO fields"""
     # Delete index if it exists
@@ -204,7 +239,21 @@ def create_index(es, index_name, dekking_types, scheme_labels):
                 "type": "text",
                 "analyzer": "dutch"
             },
-            "trefwoorden": {
+            "classificatie": {
+                "type": "text",
+                "analyzer": "dutch",
+                "fields": {
+                    "keyword": {"type": "keyword"}
+                }
+            },
+            "archiefvormer": {
+                "type": "text",
+                "analyzer": "dutch",
+                "fields": {
+                    "keyword": {"type": "keyword"}
+                }
+            },
+            "aggregatieniveau": {
                 "type": "text",
                 "analyzer": "dutch",
                 "fields": {
@@ -219,30 +268,14 @@ def create_index(es, index_name, dekking_types, scheme_labels):
                 "norms": True
             },
             "bestand_url": {"type": "keyword"},
-            "bestand_naam": {
-                "type": "text",
-                "analyzer": "dutch",
-                "fields": {
-                    "keyword": {"type": "keyword"}
-                }
-            },
-            # Metadata fields - only for faceting
-            "classificatie": {
-                "type": "keyword"
-            },
+            # Metadata fields - for search and faceting
             "classificatie_uri": {
                 "type": "keyword",
                 "index": False
             },
-            "archiefvormer": {
-                "type": "keyword"
-            },
             "archiefvormer_uri": {
                 "type": "keyword",
                 "index": False
-            },
-            "aggregatieniveau": {
-                "type": "keyword"
             },
             "aggregatieniveau_uri": {
                 "type": "keyword",
@@ -316,100 +349,6 @@ def create_elasticsearch_client():
         verify_certs=False
     )
 
-def cache_uri_response(func):
-    """Cache responses from URI dereferencing"""
-    cache = {}
-    
-    @wraps(func)
-    def wrapper(uri, g):
-        if uri in cache:
-            logger.info(f"Cache hit for {uri}")
-            return cache[uri]
-        result = func(uri, g)
-        cache[uri] = result
-        return result
-    return wrapper
-
-@cache_uri_response
-def get_beperking_gebruik_labels(uri, g):
-    """Get the scheme and label for a beperkingGebruik URI by dereferencing the URIs"""
-    import requests
-    import time
-    
-    logger.info(f"Dereferencing URI: {uri}")
-    try:
-        # Get the beperking type label and scheme
-        response = requests.get(uri, headers={'Accept': 'text/turtle'})
-        if response.status_code == 429:
-            # Wait a bit and try again
-            time.sleep(1)
-            response = requests.get(uri, headers={'Accept': 'text/turtle'})
-            
-        if response.status_code != 200:
-            logger.warning(f"Failed to dereference {uri}: {response.status_code}")
-            return None
-            
-        # Parse the response into a temporary graph
-        temp_g = Graph()
-        temp_g.parse(data=response.text, format='turtle')
-        
-        # Get the prefLabel and inScheme
-        type_label = None
-        scheme_uri = None
-        
-        # Find the prefLabel for the type
-        for _, _, label in temp_g.triples((URIRef(uri), SKOS.prefLabel, None)):
-            type_label = str(label)
-            break
-            
-        # Find the scheme URI
-        for _, _, scheme in temp_g.triples((URIRef(uri), SKOS.inScheme, None)):
-            scheme_uri = str(scheme)
-            break
-            
-        if not type_label or not scheme_uri:
-            logger.warning(f"No type_label or scheme found for {uri}")
-            return None
-            
-        # Now dereference the scheme to get its label
-        logger.info(f"Dereferencing scheme: {scheme_uri}")
-        response = requests.get(scheme_uri, headers={'Accept': 'text/turtle'})
-        if response.status_code == 429:
-            # Wait a bit and try again
-            time.sleep(1)
-            response = requests.get(scheme_uri, headers={'Accept': 'text/turtle'})
-            
-        if response.status_code != 200:
-            logger.warning(f"Failed to dereference scheme {scheme_uri}: {response.status_code}")
-            return None
-            
-        # Parse the scheme response
-        temp_g = Graph()
-        temp_g.parse(data=response.text, format='turtle')
-        
-        # Get the scheme label
-        scheme_label = None
-        for _, _, label in temp_g.triples((URIRef(scheme_uri), SKOS.prefLabel, None)):
-            scheme_label = str(label)
-            break
-            
-        if not scheme_label:
-            logger.warning(f"No scheme label found for {scheme_uri}")
-            return None
-            
-        normalized = normalize_label(scheme_label)
-        logger.info(f"Found labels - scheme: {scheme_label} -> {normalized}, type: {type_label}")
-        
-        return {
-            'scheme': scheme_uri,
-            'scheme_label': normalized,
-            'type_label': type_label
-        }
-        
-    except Exception as e:
-        logger.error(f"Error dereferencing {uri}: {e}")
-        return None
-
 def convert_ttl_to_es(ttl_file):
     # Create RDF graph and parse TTL file
     g = Graph()
@@ -430,10 +369,10 @@ def convert_ttl_to_es(ttl_file):
            (GROUP_CONCAT(?trefwoord; separator=',') as ?trefwoorden)
     WHERE {
         ?obj a ldto:Informatieobject ;
-             ldto:naam ?naam ;
-             ldto:classificatie ?classificatie ;
-             ldto:archiefvormer ?archiefvormer ;
-             ldto:aggregatieniveau ?aggregatieniveau .
+             ldto:naam ?naam .
+        OPTIONAL { ?obj ldto:classificatie ?classificatie }
+        OPTIONAL { ?obj ldto:archiefvormer ?archiefvormer }
+        OPTIONAL { ?obj ldto:aggregatieniveau ?aggregatieniveau }
         OPTIONAL { ?obj ldto:omschrijving ?omschrijving }
         OPTIONAL { 
             ?obj ldto:dekkingInTijd ?dekking .
@@ -442,9 +381,8 @@ def convert_ttl_to_es(ttl_file):
             OPTIONAL { ?dekking ldto:eind ?eind }
         }
         OPTIONAL { 
-            ?obj ldto:bestand ?bestand .
-            ?bestand ldto:url ?bestandURL ;
-                     ldto:naam ?bestandNaam .
+            ?obj ldto:heeftRepresentatie ?bestand .
+            ?bestand ldto:URLBestand ?bestandURL
         }
         OPTIONAL { ?obj ldto:beperkingGebruik ?beperkingen }
         OPTIONAL { ?obj ldto:bevatOnderdeel ?bevatOnderdeel }
@@ -459,9 +397,6 @@ def convert_ttl_to_es(ttl_file):
     
     documents = {}
     
-    # Dummy full text for testing
-    dummy_text = "Wijk bij Duurstede is een vestingstad en gemeente in het zuiden van de Nederlandse provincie Utrecht."
-    
     for row in g.query(query, initNs={'ldto': LDTO}):
         obj, naam, omschrijving, classificatie, archiefvormer, aggregatieniveau, dekking, dekkingType, begin, eind, bestand, bestandURL, bestandNaam, beperkingen, bevatOnderdeel, isOnderdeelVan, trefwoorden = row
         
@@ -469,12 +404,16 @@ def convert_ttl_to_es(ttl_file):
         doc = {
             'id': doc_id,
             'naam': str(naam),
-            'full_text': dummy_text
+            'full_text': []
         }
+        
+        # Add naam and omschrijving to full_text
+        doc['full_text'].append(str(naam))
         
         # Add optional fields if present
         if omschrijving:
             doc['omschrijving'] = str(omschrijving)
+            doc['full_text'].append(str(omschrijving))
             
         if classificatie:
             classificatie_label = get_skos_label(classificatie)
@@ -495,9 +434,12 @@ def convert_ttl_to_es(ttl_file):
                 doc['aggregatieniveau_uri'] = str(aggregatieniveau)
         
         # Process bestand if present
-        if bestand and bestandURL and bestandNaam:
+        if bestand and bestandURL:
             doc['bestand_url'] = str(bestandURL)
-            doc['bestand_naam'] = str(bestandNaam)
+            # Extract text from the file and add to full_text
+            file_content = get_file_content(str(bestandURL))
+            if file_content:
+                doc['full_text'].append(file_content)
             
         # Add hierarchical relationships if present
         if bevatOnderdeel:
@@ -509,6 +451,10 @@ def convert_ttl_to_es(ttl_file):
         # Add keywords if present
         if trefwoorden:
             doc['trefwoorden'] = [kw.strip() for kw in str(trefwoorden).split(',')]
+            doc['full_text'].extend(doc['trefwoorden'])
+
+        # Join all full_text elements into a single string
+        doc['full_text'] = "\n".join(doc['full_text']) if doc['full_text'] else None
 
         # Store document
         documents[doc_id] = doc
@@ -533,7 +479,7 @@ def convert_ttl_to_es(ttl_file):
             
             # Process each beperking
             for beperking_uri in beperkingen:
-                result = get_beperking_gebruik_labels(beperking_uri, g)
+                result = get_beperking_gebruik_labels(beperking_uri)
                 if result:
                     # Add the type label to the corresponding scheme field
                     scheme_label = result['scheme_label']
@@ -578,83 +524,27 @@ def convert_ttl_to_es(ttl_file):
     return documents, dekking_types, scheme_labels
 
 def index_documents(documents, index_name='ldto-objects'):
-    # Create Elasticsearch client
+    """Index documents in Elasticsearch"""
     es = create_elasticsearch_client()
     
-    # Create index with proper mapping
-    dekking_types = documents[1]
-    scheme_labels = documents[2]
-    documents = documents[0]
-    create_index(es, index_name, dekking_types, scheme_labels)
-    
-    # Create or update documents
-    for doc_id, doc in documents.items():
-        es.index(
-            index=index_name,
-            id=doc_id,
-            document=doc
-        )
-        logger.info(f"Indexed document {doc_id}")
-    
-    # Refresh index to make documents immediately available
+    # Index each document
+    for doc in documents.values():
+        try:
+            es.index(index=index_name, id=doc['id'], document=doc)
+            logger.info(f"Indexed document {doc['id']}")
+        except Exception as e:
+            logger.error(f"Error indexing document {doc['id']}: {str(e)}")
+            
+    # Refresh index to make documents searchable
     es.indices.refresh(index=index_name)
     logger.info("Refreshed index")
-    
-    # Show example searches and facets
-    print("\nTesting searches:")
-    
-    # Test searching for 'vergaderstuk'
-    print("\nSearch for 'vergaderstuk':")
-    search_and_print_results(es, index_name, "vergaderstuk")
-    
-    # Test case-insensitive search
-    print("\nSearch for 'VERGADERSTUK':")
-    search_and_print_results(es, index_name, "VERGADERSTUK")
-    
-    # Test partial word search
-    print("\nSearch for 'Bestuurs':")
-    search_and_print_results(es, index_name, "Bestuurs")
-    
-    # Test searching with underscore
-    print("\nSearch for 'Bijlage_1':")
-    search_and_print_results(es, index_name, "Bijlage_1")
-    
-    print("\nSearch for 'Bijlage 1':")
-    search_and_print_results(es, index_name, "Bijlage 1")
-
-    # Example date range query
-    print("\nExample date range query:")
-    date_query = {
-        "query": {
-            "bool": {
-                "must": [
-                    {
-                        "range": {
-                            "van_toepassing_range": {
-                                "gte": "2010",
-                                "lte": "2024",
-                                "relation": "intersects"
-                            }
-                        }
-                    }
-                ]
-            }
-        }
-    }
-    result = es.search(index=index_name, body=date_query)
-    print(f"\nDocuments between 2010-2024:")
-    for hit in result['hits']['hits']:
-        source = hit['_source']
-        print(f"- {source['naam']}")
-        if 'van_toepassing_range' in source:
-            print(f"  Period: {source['van_toepassing_range']['gte']} - {source['van_toepassing_range']['lte']}")
 
 def search_and_print_results(es, index_name, query):
     result = es.search(index=index_name, body={
         "query": {
             "multi_match": {
                 "query": query,
-                "fields": ["naam", "omschrijving", "classificatie", "archiefvormer", "aggregatieniveau", "trefwoorden", "full_text"],
+                "fields": ["naam", "omschrijving", "classificatie", "archiefvormer", "aggregatieniveau", "full_text"],
                 "type": "best_fields"
             }
         }
@@ -667,41 +557,36 @@ def search_and_print_results(es, index_name, query):
             print(f"  Omschrijving: {source['omschrijving']}")
         if 'classificatie' in source:
             print(f"  Classificatie: {source['classificatie']}")
-        if 'archiefvormer' in source:
-            print(f"  Archiefvormer: {source['archiefvormer']}")
         if 'aggregatieniveau' in source:
             print(f"  Aggregatieniveau: {source['aggregatieniveau']}")
-        if 'trefwoorden' in source:
-            print(f"  Trefwoorden: {source['trefwoorden']}")
+        if 'archiefvormer' in source:
+            print(f"  Archiefvormer: {source['archiefvormer']}")
 
 if __name__ == "__main__":
-    # Convert example_1.ttl
-    ttl_file = "source/example_1.ttl"
-    documents, dekking_types, scheme_labels = convert_ttl_to_es(ttl_file)
+    import argparse
     
-    # Print results for verification
-    print(f"\nFound {len(documents)} Informatieobject instances:")
-    for doc_id, doc in documents.items():
-        print(f"\nID: {doc_id}")
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Convert TTL file to Elasticsearch index')
+    parser.add_argument('ttl_file', help='Path to TTL file')
+    args = parser.parse_args()
+    
+    # Convert TTL to Elasticsearch documents
+    documents, dekking_types, scheme_labels = convert_ttl_to_es(args.ttl_file)
+    
+    # Print found documents
+    print(f"\nFound {len(documents)} Informatieobject instances:\n")
+    for doc in documents.values():
+        print(f"ID: {doc['id']}")
         print(f"Naam: {doc['naam']}")
         if 'omschrijving' in doc:
             print(f"Omschrijving: {doc['omschrijving']}")
         if 'classificatie' in doc:
             print(f"Classificatie: {doc['classificatie']}")
-        if 'archiefvormer' in doc:
-            print(f"Archiefvormer: {doc['archiefvormer']}")
         if 'aggregatieniveau' in doc:
             print(f"Aggregatieniveau: {doc['aggregatieniveau']}")
-        if 'bestand_url' in doc:
-            print(f"Bestand URL: {doc['bestand_url']}")
-        if 'bestand_naam' in doc:
-            print(f"Bestand Naam: {doc['bestand_naam']}")
-        if 'bevat_onderdeel' in doc:
-            print(f"Bevat onderdeel: {doc['bevat_onderdeel']}")
-        if 'is_onderdeel_van' in doc:
-            print(f"Is onderdeel van: {doc['is_onderdeel_van']}")
-        if 'trefwoorden' in doc:
-            print(f"Trefwoorden: {doc['trefwoorden']}")
-
-    # Index in Elasticsearch
-    index_documents((documents, dekking_types, scheme_labels))
+        if 'archiefvormer' in doc:
+            print(f"Archiefvormer: {doc['archiefvormer']}")
+        print()
+    
+    # Index documents
+    index_documents(documents, 'ldto-objects')
