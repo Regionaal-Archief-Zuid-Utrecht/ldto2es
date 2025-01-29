@@ -113,48 +113,82 @@ def get_beperking_gebruik_labels(uri):
     }
 
 def get_scheme_labels(g):
-    """Get all unique scheme labels from beperkingGebruik URIs"""
-    scheme_labels = {}
-    
-    # Find all beperkingGebruik URIs
+    """Get labels for all schemes and their types."""
     query = """
-    SELECT DISTINCT ?beperking
+    PREFIX ldto: <https://data.razu.nl/def/ldto/>
+    PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+    SELECT ?scheme ?scheme_label ?type ?type_label
     WHERE {
-        ?s ldto:beperkingGebruik ?beperking .
+        ?scheme a skos:ConceptScheme ;
+                skos:prefLabel ?scheme_label .
+        ?type skos:inScheme ?scheme ;
+              skos:prefLabel ?type_label .
     }
     """
-    
+    scheme_labels = {}
     for row in g.query(query):
-        beperking_uri = str(row.beperking)
-        result = get_beperking_gebruik_labels(beperking_uri)
-        if result and result['scheme_label']:
-            scheme_labels[result['scheme']] = result['scheme_label']
+        scheme_uri = str(row['scheme'])
+        scheme_label = str(row['scheme_label'])
+        type_label = str(row['type_label'])
+        
+        # Convert scheme label to snake_case for use as field name
+        field_name = scheme_label.lower().replace(' ', '_')
+        scheme_labels[scheme_uri] = field_name
+        
+        logger.info(f"Found labels - scheme: {scheme_label} -> {field_name}, type: {type_label}")
     
-    logger.info(f"Found scheme labels: {scheme_labels}")
     return scheme_labels
 
 def get_dekking_types(g):
-    """Get all unique dekkingInTijdType values and their SKOS labels"""
+    """Get all dekkingInTijdType values."""
     query = """
-    SELECT DISTINCT ?type
+    PREFIX ldto: <https://data.razu.nl/def/ldto/>
+    PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+    SELECT ?type ?label
     WHERE {
-        ?obj <https://data.razu.nl/def/ldto/dekkingInTijd> ?dekking .
-        ?dekking <https://data.razu.nl/def/ldto/dekkingInTijdType> ?type .
+        ?type a ldto:DekkingInTijdType ;
+              skos:prefLabel ?label .
     }
     """
-    
     dekking_types = {}
     for row in g.query(query):
-        type_uri = row[0]
-        # Get the SKOS label for this type
-        label = get_skos_label(type_uri)
-        if label:
-            # Convert label to lowercase with underscores
-            field_name = normalize_label(label)
-            dekking_types[str(type_uri)] = field_name
-            logger.info(f"Found dekkingInTijdType: {label} ({type_uri})")
-    
+        type_uri = str(row['type'])
+        label = str(row['label'])
+        dekking_types[type_uri] = label
+        logger.info(f"Found dekkingInTijdType: {label} ({type_uri})")
     return dekking_types
+
+def find_root_archive(g, doc_uri, documents):
+    """Find the root archive by following ldto:isOnderdeelVan until we reach the top level."""
+    current_uri = doc_uri
+    while True:
+        # Get parent URI through ldto:isOnderdeelVan
+        parent_query = """
+        PREFIX ldto: <https://data.razu.nl/def/ldto/>
+        SELECT ?parent
+        WHERE {
+            <%s> ldto:isOnderdeelVan ?parent .
+        }
+        """ % current_uri
+        
+        results = g.query(parent_query)
+        parent_uris = [str(row['parent']) for row in results]
+        
+        if not parent_uris:  # No parent found, this is the root
+            # Get the naam of the current document
+            naam_query = """
+            PREFIX ldto: <https://data.razu.nl/def/ldto/>
+            SELECT ?naam
+            WHERE {
+                <%s> ldto:naam ?naam .
+            }
+            """ % current_uri
+            naam_results = g.query(naam_query)
+            for row in naam_results:
+                return str(row['naam'])
+            return None  # No naam found
+            
+        current_uri = parent_uris[0]  # Follow the first parent
 
 def extract_text_from_pdf(file_path):
     """Extract text from a PDF file"""
@@ -215,13 +249,13 @@ def get_file_content(url):
         return None
 
 def create_index(es, index_name, dekking_types, scheme_labels):
-    """Create Elasticsearch index with mapping for LDTO fields"""
-    # Delete index if it exists
+    """Create Elasticsearch index with mapping for LDTO fields if it doesn't exist"""
+    # Check if index exists
     if es.indices.exists(index=index_name):
-        es.indices.delete(index=index_name)
-        logger.info(f"Deleted existing index {index_name}")
+        logger.info(f"Index {index_name} already exists")
+        return
         
-    # Basic field mapping
+    # Create index with mapping
     mapping = {
         "_source": {
             "excludes": ["full_text"]
@@ -254,6 +288,13 @@ def create_index(es, index_name, dekking_types, scheme_labels):
                 }
             },
             "aggregatieniveau": {
+                "type": "text",
+                "analyzer": "dutch",
+                "fields": {
+                    "keyword": {"type": "keyword"}
+                }
+            },
+            "archief": {
                 "type": "text",
                 "analyzer": "dutch",
                 "fields": {
@@ -350,9 +391,9 @@ def create_elasticsearch_client():
     )
 
 def convert_ttl_to_es(ttl_file):
-    # Create RDF graph and parse TTL file
+    """Convert TTL file to Elasticsearch documents."""
     g = Graph()
-    g.parse(ttl_file, format='turtle')
+    g.parse(ttl_file, format="turtle")
     
     # First get all scheme labels
     scheme_labels = get_scheme_labels(g)
@@ -360,8 +401,9 @@ def convert_ttl_to_es(ttl_file):
     # Get all dekking types
     dekking_types = get_dekking_types(g)
     
-    # Find all ldto:Informatieobject instances with their properties
+    # Find all ldto:Informatieobject instances
     query = """
+    PREFIX ldto: <https://data.razu.nl/def/ldto/>
     SELECT DISTINCT ?obj ?naam ?omschrijving ?classificatie ?archiefvormer ?aggregatieniveau 
            ?dekking ?dekkingType ?begin ?eind
            ?bestand ?bestandURL ?bestandNaam ?beperkingen
@@ -395,66 +437,66 @@ def convert_ttl_to_es(ttl_file):
              ?bevatOnderdeel ?isOnderdeelVan
     """
     
+    results = g.query(query)
+    
+    # Process results into documents
     documents = {}
     
-    for row in g.query(query, initNs={'ldto': LDTO}):
-        obj, naam, omschrijving, classificatie, archiefvormer, aggregatieniveau, dekking, dekkingType, begin, eind, bestand, bestandURL, bestandNaam, beperkingen, bevatOnderdeel, isOnderdeelVan, trefwoorden = row
-        
-        doc_id = extract_last_segment(obj)
+    for row in results:
+        doc_id = extract_last_segment(row['obj'])
         doc = {
             'id': doc_id,
-            'naam': str(naam),
-            'full_text': []
+            'naam': str(row['naam']),
+            'full_text': str(row['naam'])  # Initialize full_text with naam
         }
         
-        # Add naam and omschrijving to full_text
-        doc['full_text'].append(str(naam))
+        # Find and add the root archive name
+        root_archive = find_root_archive(g, str(row['obj']), documents)
+        if root_archive:
+            doc['archief'] = root_archive
         
         # Add optional fields if present
-        if omschrijving:
-            doc['omschrijving'] = str(omschrijving)
-            doc['full_text'].append(str(omschrijving))
+        if row['omschrijving']:
+            doc['omschrijving'] = str(row['omschrijving'])
+            doc['full_text'] += "\n" + str(row['omschrijving'])
             
-        if classificatie:
-            classificatie_label = get_skos_label(classificatie)
+        if row['classificatie']:
+            classificatie_label = get_skos_label(row['classificatie'])
             if classificatie_label:
                 doc['classificatie'] = classificatie_label
-                doc['classificatie_uri'] = str(classificatie)
+                doc['classificatie_uri'] = str(row['classificatie'])
             
-        if archiefvormer:
-            archiefvormer_label = get_skos_label(archiefvormer)
+        if row['archiefvormer']:
+            archiefvormer_label = get_skos_label(row['archiefvormer'])
             if archiefvormer_label:
                 doc['archiefvormer'] = archiefvormer_label
-                doc['archiefvormer_uri'] = str(archiefvormer)
+                doc['archiefvormer_uri'] = str(row['archiefvormer'])
             
-        if aggregatieniveau:
-            aggregatieniveau_label = get_skos_label(aggregatieniveau)
+        if row['aggregatieniveau']:
+            aggregatieniveau_label = get_skos_label(row['aggregatieniveau'])
             if aggregatieniveau_label:
                 doc['aggregatieniveau'] = aggregatieniveau_label
-                doc['aggregatieniveau_uri'] = str(aggregatieniveau)
+                doc['aggregatieniveau_uri'] = str(row['aggregatieniveau'])
         
         # Process bestand if present
-        if bestand and bestandURL:
-            doc['bestand_url'] = str(bestandURL)
+        if row['bestand'] and row['bestandURL']:
+            doc['bestand_url'] = str(row['bestandURL'])
             # Extract text from the file and add to full_text
-            file_content = get_file_content(str(bestandURL))
+            file_content = get_file_content(str(row['bestandURL']))
             if file_content:
-                doc['full_text'].append(file_content)
+                doc['full_text'] += "\n" + file_content
             
         # Add hierarchical relationships if present
-        if bevatOnderdeel:
-            doc['bevat_onderdeel'] = extract_last_segment(bevatOnderdeel)
+        if row['bevatOnderdeel']:
+            doc['bevat_onderdeel'] = extract_last_segment(row['bevatOnderdeel'])
             
-        if isOnderdeelVan:
-            doc['is_onderdeel_van'] = extract_last_segment(isOnderdeelVan)
+        if row['isOnderdeelVan']:
+            doc['is_onderdeel_van'] = extract_last_segment(row['isOnderdeelVan'])
 
         # Add keywords if present
-        if trefwoorden:
-            doc['trefwoorden'] = [kw.strip() for kw in str(trefwoorden).split(',')]
-            doc['full_text'].extend(doc['trefwoorden'])
-
-        # Join all full_text elements into a single string
-        doc['full_text'] = "\n".join(doc['full_text']) if doc['full_text'] else None
+        if row['trefwoorden']:
+            doc['trefwoorden'] = [kw.strip() for kw in str(row['trefwoorden']).split(',')]
+            doc['full_text'] += "\n" + "\n".join(doc['trefwoorden'])
 
         # Store document
         documents[doc_id] = doc
@@ -463,6 +505,7 @@ def convert_ttl_to_es(ttl_file):
     for doc_id, doc in documents.items():
         # Get all beperkingGebruik values for this document
         query = f"""
+        PREFIX ldto: <https://data.razu.nl/def/ldto/>
         SELECT ?beperking
         WHERE {{
             ?obj ldto:beperkingGebruik ?beperking .
@@ -492,6 +535,7 @@ def convert_ttl_to_es(ttl_file):
     for doc_id, doc in documents.items():
         # Get all dekkingInTijd values for this document
         query = f"""
+        PREFIX ldto: <https://data.razu.nl/def/ldto/>
         SELECT ?type ?begin ?eind
         WHERE {{
             ?obj ldto:dekkingInTijd ?dekking .
@@ -527,6 +571,11 @@ def index_documents(documents, index_name='ldto-objects'):
     """Index documents in Elasticsearch"""
     es = create_elasticsearch_client()
     
+    # Create index
+    dekking_types = get_dekking_types(Graph())
+    scheme_labels = get_scheme_labels(Graph())
+    create_index(es, index_name, dekking_types, scheme_labels)
+    
     # Index each document
     for doc in documents.values():
         try:
@@ -561,6 +610,8 @@ def search_and_print_results(es, index_name, query):
             print(f"  Aggregatieniveau: {source['aggregatieniveau']}")
         if 'archiefvormer' in source:
             print(f"  Archiefvormer: {source['archiefvormer']}")
+        if 'archief' in source:
+            print(f"  Archief: {source['archief']}")
 
 if __name__ == "__main__":
     import argparse
@@ -586,6 +637,8 @@ if __name__ == "__main__":
             print(f"Aggregatieniveau: {doc['aggregatieniveau']}")
         if 'archiefvormer' in doc:
             print(f"Archiefvormer: {doc['archiefvormer']}")
+        if 'archief' in doc:
+            print(f"Archief: {doc['archief']}")
         print()
     
     # Index documents
