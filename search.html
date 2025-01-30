@@ -8,8 +8,17 @@
             padding: 20px;
         }
         .facets {
-            width: 200px;
+            width: 300px;
             margin-right: 20px;
+        }
+        .facets label {
+            word-wrap: break-word;
+            display: inline-block;
+            max-width: 250px;
+            margin-left: 5px;
+        }
+        .facets div {
+            margin-bottom: 5px;
         }
         .results {
             flex-grow: 1;
@@ -53,10 +62,12 @@
 
         // Facetten die we willen tonen
         const FACET_FIELDS = [
-            'classificatie.keyword',
             'archiefvormer.keyword',
+            'archief.keyword',
             'aggregatieniveau.keyword',
-            'archief.keyword'
+            'classificatie.keyword',
+            'licenties.keyword',
+            'wettelijke_beperkingen_openbaarheid.keyword'
         ];
 
         // Actieve facet filters
@@ -212,8 +223,9 @@
             
             search();
         }
-
-        // Voer een eerste zoekopdracht uit bij laden
+    </script>
+    <script>
+        // Start het ophalen van de mapping bij laden van de pagina
         search();
     </script>
 </body>
