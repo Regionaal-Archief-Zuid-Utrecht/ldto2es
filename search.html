@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LDTO Search</title>
+    <style>
+        .container {
+            display: flex;
+            padding: 20px;
+        }
+        .facets {
+            width: 200px;
+            margin-right: 20px;
+        }
+        .results {
+            flex-grow: 1;
+        }
+        .search-box {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="search-box">
+        <input type="text" id="searchInput" placeholder="Zoeken..." onkeyup="if(event.key === 'Enter') search()">
+        <button onclick="search()">Zoek</button>
+    </div>
+
+    <div class="container">
+        <div class="facets" id="facets">
+            <!-- Facetten komen hier -->
+        </div>
+        <div class="results" id="results">
+            <!-- Zoekresultaten komen hier -->
+        </div>
+    </div>
+
+    <script>
+        // Elasticsearch configuratie
+        const ES_HOST = 'https://es.digitopia.nl';
+        const ES_INDEX = 'ldto-objects';
+        
+        // Haal credentials uit URL parameters
+        function getCredentials() {
+            const params = new URLSearchParams(window.location.search);
+            const user = params.get('user');
+            const pass = params.get('pass');
+            if (!user || !pass) {
+                console.error('Missing credentials in URL parameters');
+                return null;
+            }
+            return btoa(`${user}:${pass}`);
+        }
+
+        // Facetten die we willen tonen
+        const FACET_FIELDS = [
+            'classificatie.keyword',
+            'archiefvormer.keyword',
+            'aggregatieniveau.keyword',
+            'archief.keyword'
+        ];
+
+        // Actieve facet filters
+        let activeFilters = {};
+
+        async function search() {
+            const searchText = document.getElementById('searchInput').value;
+            const authHeader = getCredentials();
+            
+            if (!authHeader) {
+                document.getElementById('results').innerHTML = 'Error: Missing authentication parameters. Use ?user=xxx&pass=yyy in URL.';
+                return;
+            }
+            
+            // Bouw de query
+            const query = {
+                size: 20,
+                query: {
+                    bool: {
+                        must: [],
+                        filter: []
+                    }
+                },
+                aggs: {}
+            };
+
+            // Voeg zoekquery toe als er tekst is ingevuld
+            if (searchText && searchText.trim() !== '') {
+                if (searchText === '*') {
+                    query.query.bool.must.push({
+                        match_all: {}
+                    });
+                } else {
+                    query.query.bool.must.push({
+                        query_string: {
+                            query: searchText,
+                            fields: ['*'],
+                            default_operator: 'AND'
+                        }
+                    });
+                }
+            } else {
+                // Als er geen zoektekst is, toon alles
+                query.query.bool.must.push({
+                    match_all: {}
+                });
+            }
+
+            // Voeg facet aggregaties toe
+            FACET_FIELDS.forEach(field => {
+                query.aggs[field] = {
+                    terms: { field: field }
+                };
+            });
+
+            // Voeg actieve filters toe
+            Object.entries(activeFilters).forEach(([field, values]) => {
+                values.forEach(value => {
+                    query.query.bool.filter.push({
+                        term: { [field]: value }
+                    });
+                });
+            });
+
+            try {
+                // Voer de zoekopdracht uit
+                const response = await fetch(`${ES_HOST}/${ES_INDEX}/_search`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Basic ' + authHeader
+                    },
+                    body: JSON.stringify(query)
+                });
+
+                const data = await response.json();
+                
+                // Toon resultaten
+                displayResults(data.hits.hits);
+                
+                // Toon facetten
+                displayFacets(data.aggregations);
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        }
+
+        function displayResults(hits) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+
+            hits.forEach(hit => {
+                const doc = hit._source;
+                const div = document.createElement('div');
+                div.innerHTML = `
+                    <h3>${doc.naam}</h3>
+                    ${doc.omschrijving ? `<p>${doc.omschrijving}</p>` : ''}
+                    <p>
+                        ${doc.classificatie ? `Classificatie: ${doc.classificatie}<br>` : ''}
+                        ${doc.archiefvormer ? `Archiefvormer: ${doc.archiefvormer}<br>` : ''}
+                        ${doc.aggregatieniveau ? `Aggregatieniveau: ${doc.aggregatieniveau}<br>` : ''}
+                        ${doc.archief ? `Archief: ${doc.archief}` : ''}
+                    </p>
+                    <hr>
+                `;
+                resultsDiv.appendChild(div);
+            });
+        }
+
+        function displayFacets(aggregations) {
+            const facetsDiv = document.getElementById('facets');
+            facetsDiv.innerHTML = '';
+
+            FACET_FIELDS.forEach(field => {
+                const buckets = aggregations[field].buckets;
+                if (buckets.length > 0) {
+                    const fieldName = field.split('.')[0];
+                    const div = document.createElement('div');
+                    div.innerHTML = `<h4>${fieldName}</h4>`;
+                    
+                    buckets.forEach(bucket => {
+                        const checked = activeFilters[field]?.includes(bucket.key);
+                        div.innerHTML += `
+                            <div>
+                                <input type="checkbox" 
+                                       id="${bucket.key}" 
+                                       ${checked ? 'checked' : ''}
+                                       onchange="toggleFilter('${field}', '${bucket.key}')">
+                                <label for="${bucket.key}">${bucket.key} (${bucket.doc_count})</label>
+                            </div>
+                        `;
+                    });
+                    facetsDiv.appendChild(div);
+                }
+            });
+        }
+
+        function toggleFilter(field, value) {
+            if (!activeFilters[field]) {
+                activeFilters[field] = [];
+            }
+            
+            const index = activeFilters[field].indexOf(value);
+            if (index === -1) {
+                activeFilters[field].push(value);
+            } else {
+                activeFilters[field].splice(index, 1);
+            }
+            
+            if (activeFilters[field].length === 0) {
+                delete activeFilters[field];
+            }
+            
+            search();
+        }
+
+        // Voer een eerste zoekopdracht uit bij laden
+        search();
+    </script>
+</body>
+</html>

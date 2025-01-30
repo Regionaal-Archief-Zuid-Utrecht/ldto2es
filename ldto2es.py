@@ -1,4 +1,4 @@
-from rdflib import Graph, Namespace, URIRef
+from rdflib import Graph, Namespace, URIRef, BNode, Literal
 from elasticsearch import Elasticsearch
 import os
 import requests
@@ -404,10 +404,12 @@ def convert_ttl_to_es(ttl_file):
     # Find all ldto:Informatieobject instances
     query = """
     PREFIX ldto: <https://data.razu.nl/def/ldto/>
+    PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
     SELECT DISTINCT ?obj ?naam ?omschrijving ?classificatie ?archiefvormer ?aggregatieniveau 
            ?dekking ?dekkingType ?begin ?eind
            ?bestand ?bestandURL ?bestandNaam ?beperkingen
            ?bevatOnderdeel ?isOnderdeelVan
+           ?betrokkene ?betrokkeneActor
            (GROUP_CONCAT(?trefwoord; separator=',') as ?trefwoorden)
     WHERE {
         ?obj a ldto:Informatieobject ;
@@ -430,11 +432,16 @@ def convert_ttl_to_es(ttl_file):
         OPTIONAL { ?obj ldto:bevatOnderdeel ?bevatOnderdeel }
         OPTIONAL { ?obj ldto:isOnderdeelVan ?isOnderdeelVan }
         OPTIONAL { ?obj ldto:trefwoord ?trefwoord }
+        OPTIONAL { 
+            ?obj ldto:betrokkene ?betrokkene .
+            ?betrokkene ldto:betrokkeneActor ?betrokkeneActor
+        }
     }
     GROUP BY ?obj ?naam ?omschrijving ?classificatie ?archiefvormer ?aggregatieniveau 
              ?dekking ?dekkingType ?begin ?eind
              ?bestand ?bestandURL ?bestandNaam ?beperkingen
              ?bevatOnderdeel ?isOnderdeelVan
+             ?betrokkene ?betrokkeneActor
     """
     
     results = g.query(query)
@@ -497,6 +504,13 @@ def convert_ttl_to_es(ttl_file):
         if row['trefwoorden']:
             doc['trefwoorden'] = [kw.strip() for kw in str(row['trefwoorden']).split(',')]
             doc['full_text'] += "\n" + "\n".join(doc['trefwoorden'])
+
+        # Add betrokkeneActor label if present
+        if row['betrokkeneActor'] and not isinstance(row['betrokkeneActor'], (BNode, Literal)):
+            actor_label = get_skos_label(str(row['betrokkeneActor']))
+            if actor_label:
+                logger.info(f"Found betrokkeneActor: {actor_label}")
+                doc['full_text'] += "\n" + actor_label
 
         # Store document
         documents[doc_id] = doc
