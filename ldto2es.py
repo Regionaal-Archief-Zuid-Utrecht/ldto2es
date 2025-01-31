@@ -188,14 +188,55 @@ def find_root_archive(g, doc_uri, documents):
             
         current_uri = parent_uris[0]  # Follow the first parent
 
+def ensure_cache_dir():
+    """Ensure the cache directory exists"""
+    cache_dir = os.path.join(os.path.dirname(__file__), 'cache')
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    return cache_dir
+
+def get_cache_path(original_path):
+    """Get the cache file path for a given original file path"""
+    cache_dir = ensure_cache_dir()
+    original_name = os.path.basename(original_path)
+    base_name = os.path.splitext(original_name)[0]
+    return os.path.join(cache_dir, f"{base_name}.txt")
+
+def get_cached_text(cache_path):
+    """Get text from cache if it exists"""
+    if os.path.exists(cache_path):
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    return None
+
+def save_to_cache(cache_path, text):
+    """Save extracted text to cache"""
+    # Ensure text is a string, even if None
+    text = text or ""
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        f.write(text)
+
 def extract_text_from_file(file_path):
-    """Extract text from a file using textract"""
+    """Extract text from a file using textract, with caching"""
+    # Get cache path and check if cached version exists
+    cache_path = get_cache_path(file_path)
+    cached_text = get_cached_text(cache_path)
+    
+    if cached_text is not None:
+        logger.info(f"Using cached text for {file_path}")
+        return cached_text if cached_text != "" else None
+    
+    # If not in cache, extract text
     try:
         text = textract.process(file_path, encoding='utf-8').decode('utf-8')
-        return text
     except Exception as e:
         logger.error(f"Error extracting text from file {file_path}: {e}")
-        return None
+        text = None
+    
+    # Save to cache (even if extraction failed)
+    save_to_cache(cache_path, text)
+    
+    return text
 
 def get_file_content(url, docs_dir='docs'):
     """Get text content from a file in the specified directory"""
