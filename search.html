@@ -20,26 +20,55 @@
         .facets div {
             margin-bottom: 5px;
         }
+        .results-container {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+        }
         .results {
             flex-grow: 1;
         }
         .search-box {
             margin-bottom: 20px;
+            width: 100%;
+            display: flex;
+            gap: 10px;
+        }
+        .search-box input {
+            flex: 1;
+            padding: 5px;
+        }
+        .search-box button {
+            padding: 5px 15px;
+            white-space: nowrap;
+        }
+        .pagination {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .pagination button {
+            margin: 0 5px;
+            padding: 5px 10px;
+            cursor: pointer;
         }
     </style>
 </head>
 <body>
-    <div class="search-box">
-        <input type="text" id="searchInput" placeholder="Zoeken..." onkeyup="if(event.key === 'Enter') search()">
-        <button onclick="search()">Zoek</button>
-    </div>
-
     <div class="container">
         <div class="facets" id="facets">
             <!-- Facetten komen hier -->
         </div>
-        <div class="results" id="results">
-            <!-- Zoekresultaten komen hier -->
+        <div class="results-container">
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="Zoeken..." onkeyup="if(event.key === 'Enter') search()">
+                <button onclick="search()">Zoek</button>
+            </div>
+            <div class="results" id="results">
+                <!-- Zoekresultaten komen hier -->
+            </div>
+            <div class="pagination" id="pagination">
+                <!-- Pagineringselementen komen hier -->
+            </div>
         </div>
     </div>
 
@@ -73,6 +102,9 @@
         // Actieve facet filters
         let activeFilters = {};
 
+        let currentPage = 0;
+        const pageSize = 20;
+
         async function search() {
             const searchText = document.getElementById('searchInput').value;
             const authHeader = getCredentials();
@@ -84,7 +116,8 @@
             
             // Bouw de query
             const query = {
-                size: 20,
+                size: pageSize,
+                from: currentPage * pageSize,
                 query: {
                     bool: {
                         must: [],
@@ -146,18 +179,32 @@
                 const data = await response.json();
                 
                 // Toon resultaten
-                displayResults(data.hits.hits);
+                displayResults(data.hits.hits, data.hits.total.value);
                 
                 // Toon facetten
                 displayFacets(data.aggregations);
+
+                // Update paginering
+                updatePagination(data.hits.total.value);
             } catch (error) {
                 console.error('Error:', error);
             }
         }
 
-        function displayResults(hits) {
+        function displayResults(hits, totalHits) {
             const resultsDiv = document.getElementById('results');
             resultsDiv.innerHTML = '';
+
+            // Voeg kop en resultaat telling toe
+            const start = currentPage * pageSize + 1;
+            const end = Math.min((currentPage + 1) * pageSize, totalHits);
+            
+            const header = document.createElement('div');
+            header.innerHTML = `
+                <h2>Zoekresultaten</h2>
+                <p>Resultaten ${start} tot ${end} van de ${totalHits}</p>
+            `;
+            resultsDiv.appendChild(header);
 
             hits.forEach(hit => {
                 const doc = hit._source;
@@ -222,6 +269,22 @@
             }
             
             search();
+        }
+
+        function updatePagination(totalHits) {
+            const paginationElement = document.getElementById('pagination');
+            paginationElement.innerHTML = '';
+            const totalPages = Math.ceil(totalHits / pageSize);
+
+            for (let i = 0; i < totalPages; i++) {
+                const pageButton = document.createElement('button');
+                pageButton.innerText = i + 1;
+                pageButton.onclick = () => {
+                    currentPage = i;
+                    search();
+                };
+                paginationElement.appendChild(pageButton);
+            }
         }
     </script>
     <script>

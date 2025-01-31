@@ -3,9 +3,7 @@ from elasticsearch import Elasticsearch
 import os
 import requests
 from urllib.parse import urljoin, urlparse, unquote
-from pdfminer.high_level import extract_text as pdf_extract_text
-from docx import Document
-from openpyxl import load_workbook
+import textract
 import io
 import logging
 import time
@@ -190,59 +188,28 @@ def find_root_archive(g, doc_uri, documents):
             
         current_uri = parent_uris[0]  # Follow the first parent
 
-def extract_text_from_pdf(file_path):
-    """Extract text from a PDF file"""
+def extract_text_from_file(file_path):
+    """Extract text from a file using textract"""
     try:
-        return pdf_extract_text(file_path)
+        text = textract.process(file_path, encoding='utf-8').decode('utf-8')
+        return text
     except Exception as e:
-        logger.error(f"Error extracting text from PDF {file_path}: {e}")
+        logger.error(f"Error extracting text from file {file_path}: {e}")
         return None
 
-def extract_text_from_docx(file_path):
-    """Extract text from a DOCX file"""
-    try:
-        doc = Document(file_path)
-        return "\n".join([paragraph.text for paragraph in doc.paragraphs])
-    except Exception as e:
-        logger.error(f"Error extracting text from DOCX {file_path}: {e}")
-        return None
-
-def extract_text_from_xlsx(file_path):
-    """Extract text from an XLSX file"""
-    try:
-        wb = load_workbook(file_path, read_only=True, data_only=True)
-        texts = []
-        for sheet in wb.sheetnames:
-            ws = wb[sheet]
-            for row in ws.rows:
-                texts.extend(str(cell.value) for cell in row if cell.value)
-        return "\n".join(texts)
-    except Exception as e:
-        logger.error(f"Error extracting text from XLSX {file_path}: {e}")
-        return None
-
-def get_file_content(url):
-    """Get text content from a file in the docs directory"""
+def get_file_content(url, docs_dir='docs'):
+    """Get text content from a file in the specified directory"""
     try:
         # Extract filename from URL and decode it
         filename = unquote(os.path.basename(urlparse(url).path))
-        file_path = os.path.join('docs', filename)
+        file_path = os.path.join(docs_dir, filename)
         
         if not os.path.exists(file_path):
             logger.warning(f"File not found: {file_path}")
             return None
             
-        # Determine file type and extract text
-        ext = os.path.splitext(filename)[1].lower()
-        if ext == '.pdf':
-            return extract_text_from_pdf(file_path)
-        elif ext == '.docx':
-            return extract_text_from_docx(file_path)
-        elif ext == '.xlsx':
-            return extract_text_from_xlsx(file_path)
-        else:
-            logger.warning(f"Unsupported file type: {ext}")
-            return None
+        # Extract text using textract
+        return extract_text_from_file(file_path)
             
     except Exception as e:
         logger.error(f"Error processing file from URL {url}: {e}")
@@ -390,7 +357,7 @@ def create_elasticsearch_client():
         verify_certs=False
     )
 
-def convert_ttl_to_es(ttl_file):
+def convert_ttl_to_es(ttl_file, docs_dir='docs'):
     """Convert TTL file to Elasticsearch documents."""
     g = Graph()
     g.parse(ttl_file, format="turtle")
@@ -489,7 +456,7 @@ def convert_ttl_to_es(ttl_file):
         if row['bestand'] and row['bestandURL']:
             doc['bestand_url'] = str(row['bestandURL'])
             # Extract text from the file and add to full_text
-            file_content = get_file_content(str(row['bestandURL']))
+            file_content = get_file_content(str(row['bestandURL']), docs_dir)
             if file_content:
                 doc['full_text'] += "\n" + file_content
             
@@ -633,10 +600,11 @@ if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Convert TTL file to Elasticsearch index')
     parser.add_argument('ttl_file', help='Path to TTL file')
+    parser.add_argument('--docs-dir', default='docs', help='Directory containing the documents (default: docs)')
     args = parser.parse_args()
     
     # Convert TTL to Elasticsearch documents
-    documents, dekking_types, scheme_labels = convert_ttl_to_es(args.ttl_file)
+    documents, dekking_types, scheme_labels = convert_ttl_to_es(args.ttl_file, args.docs_dir)
     
     # Print found documents
     print(f"\nFound {len(documents)} Informatieobject instances:\n")
