@@ -258,129 +258,66 @@ def get_file_content(url, docs_dir='docs'):
 
 def create_index(es, index_name, dekking_types, scheme_labels):
     """Create Elasticsearch index with mapping for LDTO fields if it doesn't exist"""
-    # Check if index exists
-    if es.indices.exists(index=index_name):
-        logger.info(f"Index {index_name} already exists")
-        return
-        
-    # Create index with mapping
+    # Basic mapping for known fields
     mapping = {
-        "_source": {
-            "excludes": ["full_text"]
-        },
-        "properties": {
-            "id": {"type": "keyword"},
-            "naam": {
-                "type": "text",
-                "analyzer": "dutch",
-                "fields": {
-                    "keyword": {"type": "keyword"}
+        "mappings": {
+            "dynamic": "true",  # Allow dynamic fields for event dates
+            "dynamic_templates": [
+                {
+                    "dates": {
+                        "match_pattern": "regex",
+                        "match": "^(created|modified|published|approved|received|sent|processed|archived|registered|completed|reviewed|validated).*",
+                        "mapping": {
+                            "type": "date"
+                        }
+                    }
                 }
-            },
-            "omschrijving": {
-                "type": "text",
-                "analyzer": "dutch"
-            },
-            "classificatie": {
-                "type": "text",
-                "analyzer": "dutch",
-                "fields": {
-                    "keyword": {"type": "keyword"}
-                }
-            },
-            "archiefvormer": {
-                "type": "text",
-                "analyzer": "dutch",
-                "fields": {
-                    "keyword": {"type": "keyword"}
-                }
-            },
-            "aggregatieniveau": {
-                "type": "text",
-                "analyzer": "dutch",
-                "fields": {
-                    "keyword": {"type": "keyword"}
-                }
-            },
-            "archief": {
-                "type": "text",
-                "analyzer": "dutch",
-                "fields": {
-                    "keyword": {"type": "keyword"}
-                }
-            },
-            "full_text": {
-                "type": "text",
-                "analyzer": "dutch",
-                "store": False,
-                "index_options": "docs",
-                "norms": True
-            },
-            "bestand_url": {"type": "keyword"},
-            # Metadata fields - for search and faceting
-            "classificatie_uri": {
-                "type": "keyword",
-                "index": False
-            },
-            "archiefvormer_uri": {
-                "type": "keyword",
-                "index": False
-            },
-            "aggregatieniveau_uri": {
-                "type": "keyword",
-                "index": False
-            },
-            # Hierarchical relationships - not searchable
-            "bevat_onderdeel": {
-                "type": "keyword",
-                "index": False
-            },
-            "is_onderdeel_van": {
-                "type": "keyword",
-                "index": False
+            ],
+            "properties": {
+                "id": {"type": "keyword"},
+                "naam": {
+                    "type": "text",
+                    "fields": {
+                        "keyword": {"type": "keyword"}
+                    }
+                },
+                "omschrijving": {"type": "text"},
+                "full_text": {"type": "text"},
+                "classificatie": {"type": "keyword"},
+                "classificatie_uri": {"type": "keyword"},
+                "archiefvormer": {"type": "keyword"},
+                "archiefvormer_uri": {"type": "keyword"},
+                "aggregatieniveau": {"type": "keyword"},
+                "aggregatieniveau_uri": {"type": "keyword"},
+                "bestand_url": {"type": "keyword"},
+                "archief": {"type": "keyword"}
             }
         }
     }
     
-    # Add date range fields for each dekking type
-    for dekking_type, field_name in dekking_types.items():
-        mapping["properties"][f"{field_name}_range"] = {
-            "type": "date_range",
-            "format": "yyyy-MM-dd||yyyy"
+    # Add dynamic mappings for dekking types
+    for dekking_type in dekking_types:
+        field_name = normalize_label(dekking_type)
+        mapping["mappings"]["properties"][field_name] = {
+            "type": "date"
         }
-        
-    # Add fields for each scheme
-    for scheme_uri, scheme_label in scheme_labels.items():
-        mapping["properties"][scheme_label] = {
+    
+    # Add mappings for scheme labels
+    for scheme in scheme_labels:
+        scheme_name = normalize_label(scheme['label'])
+        mapping["mappings"]["properties"][scheme_name] = {
             "type": "keyword"
         }
-        
-    # Create index with mapping
-    es.indices.create(
-        index=index_name,
-        mappings=mapping,
-        settings={
-            "analysis": {
-                "analyzer": {
-                    "dutch": {
-                        "tokenizer": "standard",
-                        "filter": ["lowercase", "dutch_stop", "dutch_stemmer"]
-                    }
-                },
-                "filter": {
-                    "dutch_stop": {
-                        "type": "stop",
-                        "stopwords": "_dutch_"
-                    },
-                    "dutch_stemmer": {
-                        "type": "stemmer",
-                        "language": "dutch"
-                    }
-                }
-            }
+        mapping["mappings"]["properties"][f"{scheme_name}_uri"] = {
+            "type": "keyword"
         }
-    )
-    logger.info(f"Created index {index_name} with facet mapping")
+    
+    # Create the index if it doesn't exist
+    if not es.indices.exists(index=index_name):
+        es.indices.create(index=index_name, body=mapping)
+        logger.info(f"Created index {index_name}")
+    else:
+        logger.info(f"Index {index_name} already exists")
 
 def create_elasticsearch_client():
     """Create and configure Elasticsearch client"""
@@ -398,6 +335,89 @@ def create_elasticsearch_client():
         verify_certs=False
     )
 
+def process_time_field(row, type_field, time_field, doc):
+    """Process a time-related field and add it to the document.
+    
+    Args:
+        row: The query result row
+        type_field: The field containing the type URI (e.g., 'eventType' or 'dekkingType')
+        time_field: The field containing the time value (e.g., 'eventTijd' or 'begin'/'eind')
+        doc: The document to add the field to
+    """
+    if row[type_field] and row[time_field]:
+        type_label = get_skos_label(row[type_field])
+        if type_label:
+            field_name = normalize_label(type_label)
+            doc[field_name] = str(row[time_field])
+
+def process_skos_field(row, field_name, doc):
+    """Process a SKOS-related field and add it to the document.
+    
+    Args:
+        row: The query result row
+        field_name: The name of the field (e.g., 'classificatie', 'archiefvormer')
+        doc: The document to add the field to
+    """
+    if row[field_name]:
+        label = get_skos_label(row[field_name])
+        if label:
+            doc[field_name] = label
+            doc[f'{field_name}_uri'] = str(row[field_name])
+            return label
+    return None
+
+def process_relation_field(row, field_name, doc, target_field=None):
+    """Process a relation field and add it to the document.
+    
+    Args:
+        row: The query result row
+        field_name: The name of the field in the row
+        doc: The document to add the field to
+        target_field: Optional different name for the target field in doc
+    """
+    if row[field_name]:
+        target = target_field or field_name
+        doc[target] = extract_last_segment(row[field_name])
+
+def append_to_full_text(doc, content, separator="\n"):
+    """Veilig tekst toevoegen aan full_text veld"""
+    if not content:
+        return
+        
+    if isinstance(content, (list, tuple)):
+        text = separator.join(str(item) for item in content if item)
+    else:
+        text = str(content).strip()
+    
+    if text:
+        if 'full_text' not in doc:
+            doc['full_text'] = text
+        else:
+            doc['full_text'] += f"{separator}{text}"
+
+def init_document(row):
+    """Basis documentstructuur initialiseren"""
+    doc = {
+        'id': extract_last_segment(row['obj']),
+        'naam': str(row['naam'])
+    }
+    append_to_full_text(doc, row['naam'])
+    return doc
+
+def process_optional_field(row, doc, field_name, processor=None):
+    """Generieke verwerking van optionele velden"""
+    if row.get(field_name):
+        if processor:
+            processor(row[field_name], doc)
+        else:
+            doc[field_name] = str(row[field_name])
+
+def process_bestand(url, doc, docs_dir):
+    """Verwerk bestand gerelateerde data"""
+    doc['bestand_url'] = str(url)
+    file_content = get_file_content(str(url), docs_dir)
+    append_to_full_text(doc, file_content)
+
 def convert_ttl_to_es(ttl_file, docs_dir='docs'):
     """Convert TTL file to Elasticsearch documents."""
     g = Graph()
@@ -409,6 +429,23 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
     # Get all dekking types
     dekking_types = get_dekking_types(g)
     
+    # Field processors configuratie
+    field_processors = {
+        'omschrijving': lambda val, doc: (
+            doc.update({'omschrijving': str(val)}) or 
+            append_to_full_text(doc, val)
+        ),
+        'bestandURL': lambda val, doc: process_bestand(val, doc, docs_dir),
+        'trefwoorden': lambda val, doc: (
+            doc.update({'trefwoorden': [kw.strip() for kw in str(val).split(',')]}) or
+            append_to_full_text(doc, doc['trefwoorden'], ", ")
+        ),
+        'betrokkeneActor': lambda val, doc: (
+            process_skos_field(row, 'betrokkeneActor', doc) and 
+            append_to_full_text(doc, doc.get('betrokkeneActor'))
+        )
+    }
+
     # Find all ldto:Informatieobject instances
     query = """
     PREFIX ldto: <https://data.razu.nl/def/ldto/>
@@ -417,7 +454,7 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
            ?dekking ?dekkingType ?begin ?eind
            ?bestand ?bestandURL ?bestandNaam ?beperkingen
            ?bevatOnderdeel ?isOnderdeelVan
-           ?betrokkene ?betrokkeneActor
+           ?betrokkene ?betrokkeneActor ?event ?eventType ?eventTijd
            (GROUP_CONCAT(?trefwoord; separator=',') as ?trefwoorden)
     WHERE {
         ?obj a ldto:Informatieobject ;
@@ -444,12 +481,17 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
             ?obj ldto:betrokkene ?betrokkene .
             ?betrokkene ldto:betrokkeneActor ?betrokkeneActor
         }
+        OPTIONAL {
+            ?obj ldto:event ?event .
+            ?event ldto:eventType ?eventType ;
+                   ldto:eventTijd ?eventTijd .
+        }
     }
     GROUP BY ?obj ?naam ?omschrijving ?classificatie ?archiefvormer ?aggregatieniveau 
              ?dekking ?dekkingType ?begin ?eind
              ?bestand ?bestandURL ?bestandNaam ?beperkingen
              ?bevatOnderdeel ?isOnderdeelVan
-             ?betrokkene ?betrokkeneActor
+             ?betrokkene ?betrokkeneActor ?event ?eventType ?eventTijd
     """
     
     results = g.query(query)
@@ -458,71 +500,39 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
     documents = {}
     
     for row in results:
-        doc_id = extract_last_segment(row['obj'])
-        doc = {
-            'id': doc_id,
-            'naam': str(row['naam']),
-            'full_text': str(row['naam'])  # Initialize full_text with naam
-        }
+        doc = init_document(row)
         
         # Find and add the root archive name
         root_archive = find_root_archive(g, str(row['obj']), documents)
         if root_archive:
             doc['archief'] = root_archive
+            
+        # Process time-related fields
+        # Handle events
+        process_time_field(row, 'eventType', 'eventTijd', doc)
         
-        # Add optional fields if present
-        if row['omschrijving']:
-            doc['omschrijving'] = str(row['omschrijving'])
-            doc['full_text'] += "\n" + str(row['omschrijving'])
-            
-        if row['classificatie']:
-            classificatie_label = get_skos_label(row['classificatie'])
-            if classificatie_label:
-                doc['classificatie'] = classificatie_label
-                doc['classificatie_uri'] = str(row['classificatie'])
-            
-        if row['archiefvormer']:
-            archiefvormer_label = get_skos_label(row['archiefvormer'])
-            if archiefvormer_label:
-                doc['archiefvormer'] = archiefvormer_label
-                doc['archiefvormer_uri'] = str(row['archiefvormer'])
-            
-        if row['aggregatieniveau']:
-            aggregatieniveau_label = get_skos_label(row['aggregatieniveau'])
-            if aggregatieniveau_label:
-                doc['aggregatieniveau'] = aggregatieniveau_label
-                doc['aggregatieniveau_uri'] = str(row['aggregatieniveau'])
+        # Handle dekking begin and end
+        if row['dekkingType']:
+            process_time_field(row, 'dekkingType', 'begin', doc)
+            process_time_field(row, 'dekkingType', 'eind', doc)
         
-        # Process bestand if present
-        if row['bestand'] and row['bestandURL']:
-            doc['bestand_url'] = str(row['bestandURL'])
-            # Extract text from the file and add to full_text
-            file_content = get_file_content(str(row['bestandURL']), docs_dir)
-            if file_content:
-                doc['full_text'] += "\n" + file_content
-            
+        # Automatische veldverwerking
+        for field, processor in field_processors.items():
+            process_optional_field(row, doc, field, processor)
+        
+        # Process SKOS fields
+        for field in ['classificatie', 'archiefvormer', 'aggregatieniveau']:
+            label = process_skos_field(row, field, doc)
+            if label:
+                append_to_full_text(doc, label)
+        
         # Add hierarchical relationships if present
-        if row['bevatOnderdeel']:
-            doc['bevat_onderdeel'] = extract_last_segment(row['bevatOnderdeel'])
-            
-        if row['isOnderdeelVan']:
-            doc['is_onderdeel_van'] = extract_last_segment(row['isOnderdeelVan'])
-
-        # Add keywords if present
-        if row['trefwoorden']:
-            doc['trefwoorden'] = [kw.strip() for kw in str(row['trefwoorden']).split(',')]
-            doc['full_text'] += "\n" + "\n".join(doc['trefwoorden'])
-
-        # Add betrokkeneActor label if present
-        if row['betrokkeneActor'] and not isinstance(row['betrokkeneActor'], (BNode, Literal)):
-            actor_label = get_skos_label(str(row['betrokkeneActor']))
-            if actor_label:
-                logger.info(f"Found betrokkeneActor: {actor_label}")
-                doc['full_text'] += "\n" + actor_label
+        process_relation_field(row, 'bevatOnderdeel', doc, 'bevat_onderdeel')
+        process_relation_field(row, 'isOnderdeelVan', doc, 'is_onderdeel_van')
 
         # Store document
-        documents[doc_id] = doc
-        
+        documents[doc['id']] = doc
+
     # Process beperkingGebruik for each document
     for doc_id, doc in documents.items():
         # Get all beperkingGebruik values for this document
@@ -589,26 +599,75 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
         
     return documents, dekking_types, scheme_labels
 
-def index_documents(documents, index_name='ldto-objects'):
-    """Index documents in Elasticsearch"""
-    es = create_elasticsearch_client()
-    
-    # Create index
-    dekking_types = get_dekking_types(Graph())
-    scheme_labels = get_scheme_labels(Graph())
-    create_index(es, index_name, dekking_types, scheme_labels)
-    
-    # Index each document
-    for doc in documents.values():
-        try:
-            es.index(index=index_name, id=doc['id'], document=doc)
-            logger.info(f"Indexed document {doc['id']}")
-        except Exception as e:
-            logger.error(f"Error indexing document {doc['id']}: {str(e)}")
-            
-    # Refresh index to make documents searchable
-    es.indices.refresh(index=index_name)
-    logger.info("Refreshed index")
+def index_documents(es, index_name, documents):
+    """Index documents using Elasticsearch bulk API."""
+    if not documents:
+        logger.warning("No documents to index")
+        return
+
+    # Prepare bulk indexing actions
+    actions = []
+    for doc_id, doc in documents.items():
+        # Actie regel
+        actions.append({"index": {"_index": index_name, "_id": doc_id}})
+        # Data regel
+        actions.append(doc)
+
+    # Start with smaller batch size (in paren van 2 omdat elke doc twee regels heeft)
+    batch_size = 500  # Dit betekent 100 documenten per batch
+    successful_docs = 0
+    max_retries = 3
+    failed_docs = []
+
+    for i in range(0, len(actions), batch_size):
+        batch = actions[i:i + batch_size]
+        retry_count = 0
+        batch_success = False
+        
+        while retry_count < max_retries and not batch_success:
+            try:
+                response = es.bulk(body=batch, refresh=True)
+                if response["errors"]:
+                    # Log details of failed operations
+                    for item in response["items"]:
+                        if "error" in item["index"]:
+                            error_id = item["index"]["_id"]
+                            error_msg = item["index"]["error"]
+                            logger.error(f"Error indexing document {error_id}: {error_msg}")
+                            failed_docs.append(error_id)
+                else:
+                    successful_docs += len(batch) // 2  # Deel door 2 omdat elke doc twee regels heeft
+                    logger.info(f"Successfully indexed batch of {len(batch) // 2} documents ({successful_docs}/{len(documents)} total)")
+                batch_success = True
+                
+            except Exception as e:
+                retry_count += 1
+                if "413 Request Entity Too Large" in str(e):
+                    # Als we een 413 krijgen, probeer de batch te splitsen
+                    if batch_size > 20:  # Niet kleiner dan 10 documenten (20 regels) maken
+                        batch_size = max(20, batch_size // 2)
+                        logger.warning(f"Request too large, reducing batch size to {batch_size} actions ({batch_size // 2} documents)")
+                        # Herstart met deze batch met nieuwe grootte
+                        i -= len(batch)
+                        break
+                    else:
+                        logger.error("Batch size already at minimum, cannot reduce further")
+                        # Voeg de gefaalde documenten toe aan de failed list
+                        failed_docs.extend([action["index"]["_id"] for action in batch[::2]])  # Pak alleen de index acties
+                        break
+                elif retry_count == max_retries:
+                    logger.error(f"Failed to index batch after {max_retries} retries: {e}")
+                    # Voeg de gefaalde documenten toe aan de failed list
+                    failed_docs.extend([action["index"]["_id"] for action in batch[::2]])  # Pak alleen de index acties
+                else:
+                    wait_time = 2 ** retry_count
+                    logger.warning(f"Retry {retry_count}/{max_retries} after error: {e}. Waiting {wait_time} seconds...")
+                    time.sleep(wait_time)  
+
+    # Final status report
+    if failed_docs:
+        logger.error(f"Failed to index {len(failed_docs)} documents: {failed_docs}")
+    logger.info(f"Finished indexing: {successful_docs} successful, {len(failed_docs)} failed out of {len(documents)} total documents")
 
 def search_and_print_results(es, index_name, query):
     result = es.search(index=index_name, body={
@@ -665,4 +724,6 @@ if __name__ == "__main__":
         print()
     
     # Index documents
-    index_documents(documents, 'ldto-objects')
+    es = create_elasticsearch_client()
+    create_index(es, 'ldto-objects', dekking_types, scheme_labels)
+    index_documents(es, 'ldto-objects', documents)
