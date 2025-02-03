@@ -256,10 +256,23 @@ def get_file_content(url, docs_dir='docs'):
         logger.error(f"Error processing file from URL {url}: {e}")
         return None
 
-def create_index(es, index_name, dekking_types, scheme_labels):
-    """Create Elasticsearch index with mapping for LDTO fields if it doesn't exist"""
+def create_index(es, index_name, dekking_types, scheme_labels, window_size=500):
+    """Create Elasticsearch index with mapping for LDTO fields if it doesn't exist
+    
+    Args:
+        es: Elasticsearch client
+        index_name: Name of the index to create
+        dekking_types: List of dekking types for mapping
+        scheme_labels: List of scheme labels for mapping
+        window_size: Size for max_inner_result_window (default: 100)
+    """
     # Basic mapping for known fields
     mapping = {
+        "settings": {
+            "index": {
+                "max_inner_result_window": window_size
+            }
+        },
         "mappings": {
             "dynamic": "true",  # Allow dynamic fields for event dates
             "dynamic_templates": [
@@ -321,6 +334,27 @@ def create_index(es, index_name, dekking_types, scheme_labels):
         logger.info(f"Created index {index_name}")
     else:
         logger.info(f"Index {index_name} already exists")
+
+def update_inner_result_window(es, index_name, size=100):
+    """Update max_inner_result_window setting for an existing index.
+    
+    Args:
+        es: Elasticsearch client
+        index_name: Name of the index to update
+        size: New size for max_inner_result_window (default: 100)
+    """
+    try:
+        es.indices.put_settings(
+            index=index_name,
+            body={
+                "index": {
+                    "max_inner_result_window": size
+                }
+            }
+        )
+        print(f"Successfully updated max_inner_result_window to {size} for index {index_name}")
+    except Exception as e:
+        print(f"Error updating max_inner_result_window: {e}")
 
 def create_elasticsearch_client():
     """Create and configure Elasticsearch client"""
@@ -701,33 +735,21 @@ def search_and_print_results(es, index_name, query):
 if __name__ == "__main__":
     import argparse
     
-    # Set up argument parser
-    parser = argparse.ArgumentParser(description='Convert TTL file to Elasticsearch index')
-    parser.add_argument('ttl_file', help='Path to TTL file')
-    parser.add_argument('--docs-dir', default='docs', help='Directory containing the documents (default: docs)')
+    parser = argparse.ArgumentParser(description='LDTO to Elasticsearch converter')
+    parser.add_argument('action', choices=['convert', 'update-window'], help='Action to perform')
+    parser.add_argument('--file', help='TTL file to convert')
+    parser.add_argument('--index', default='ldto-objects', help='Elasticsearch index name')
+    parser.add_argument('--window-size', type=int, default=100, help='Size for max_inner_result_window')
+    
     args = parser.parse_args()
     
-    # Convert TTL to Elasticsearch documents
-    documents, dekking_types, scheme_labels = convert_ttl_to_es(args.ttl_file, args.docs_dir)
-    
-    # Print found documents
-    print(f"\nFound {len(documents)} Informatieobject instances:\n")
-    for doc in documents.values():
-        print(f"ID: {doc['id']}")
-        print(f"Naam: {doc['naam']}")
-        if 'omschrijving' in doc:
-            print(f"Omschrijving: {doc['omschrijving']}")
-        if 'classificatie' in doc:
-            print(f"Classificatie: {doc['classificatie']}")
-        if 'aggregatieniveau' in doc:
-            print(f"Aggregatieniveau: {doc['aggregatieniveau']}")
-        if 'archiefvormer' in doc:
-            print(f"Archiefvormer: {doc['archiefvormer']}")
-        if 'archief' in doc:
-            print(f"Archief: {doc['archief']}")
-        print()
-    
-    # Index documents
     es = create_elasticsearch_client()
-    create_index(es, 'ldto-objects', dekking_types, scheme_labels)
-    index_documents(es, 'ldto-objects', documents)
+    
+    if args.action == 'convert':
+        if not args.file:
+            parser.error("--file is required for convert action")
+        documents, dekking_types, scheme_labels = convert_ttl_to_es(args.file)
+        create_index(es, args.index, dekking_types, scheme_labels, window_size=args.window_size)
+        index_documents(es, args.index, documents)
+    elif args.action == 'update-window':
+        update_inner_result_window(es, args.index, args.window_size)
