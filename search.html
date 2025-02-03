@@ -237,13 +237,14 @@
                     
                     buckets.forEach(bucket => {
                         const checked = activeFilters[field]?.includes(bucket.key);
+                        const escapedKey = bucket.key.replace(/'/g, "\\'");
                         div.innerHTML += `
                             <div>
                                 <input type="checkbox" 
-                                       id="${bucket.key}" 
+                                       id="${escapedKey}" 
                                        ${checked ? 'checked' : ''}
-                                       onchange="toggleFilter('${field}', '${bucket.key}')">
-                                <label for="${bucket.key}">${bucket.key} (${bucket.doc_count})</label>
+                                       onchange="toggleFilter('${field}', '${escapedKey}')">
+                                <label for="${escapedKey}">${bucket.key} (${bucket.doc_count})</label>
                             </div>
                         `;
                     });
