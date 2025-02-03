@@ -83,8 +83,7 @@
             const user = params.get('user');
             const pass = params.get('pass');
             if (!user || !pass) {
-                console.error('Missing credentials in URL parameters');
-                return null;
+                return '';
             }
             return btoa(`${user}:${pass}`);
         }
@@ -108,11 +107,6 @@
         async function search() {
             const searchText = document.getElementById('searchInput').value;
             const authHeader = getCredentials();
-            
-            if (!authHeader) {
-                document.getElementById('results').innerHTML = 'Error: Missing authentication parameters. Use ?user=xxx&pass=yyy in URL.';
-                return;
-            }
             
             // Bouw de query
             const query = {
@@ -167,12 +161,17 @@
 
             try {
                 // Voer de zoekopdracht uit
+                const headers = {
+                    'Content-Type': 'application/json'
+                };
+                
+                if (authHeader) {
+                    headers['Authorization'] = `Basic ${authHeader}`;
+                }
+
                 const response = await fetch(`${ES_HOST}/${ES_INDEX}/_search`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Basic ' + authHeader
-                    },
+                    headers: headers,
                     body: JSON.stringify(query)
                 });
 

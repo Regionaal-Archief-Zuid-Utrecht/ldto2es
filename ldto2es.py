@@ -274,6 +274,9 @@ def create_index(es, index_name, dekking_types, scheme_labels):
                 }
             ],
             "properties": {
+                "@id": {
+                    "type": "keyword"
+                },
                 "id": {"type": "keyword"},
                 "naam": {
                     "type": "text",
@@ -399,6 +402,7 @@ def init_document(row):
     """Basis documentstructuur initialiseren"""
     doc = {
         'id': extract_last_segment(row['obj']),
+        '@id': str(row['obj']),
         'naam': str(row['naam'])
     }
     append_to_full_text(doc, row['naam'])
