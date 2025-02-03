@@ -736,19 +736,41 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='LDTO to Elasticsearch converter')
-    parser.add_argument('action', choices=['convert', 'update-window'], help='Action to perform')
-    parser.add_argument('--file', help='TTL file to convert')
-    parser.add_argument('--index', default='ldto-objects', help='Elasticsearch index name')
-    parser.add_argument('--window-size', type=int, default=100, help='Size for max_inner_result_window')
+    
+    # Maak subparsers voor verschillende commando's
+    subparsers = parser.add_subparsers(dest='action', help='Action to perform')
+    
+    # Parser voor het convert commando
+    convert_parser = subparsers.add_parser('convert', help='Convert TTL file to Elasticsearch')
+    convert_parser.add_argument('--file', help='TTL file to convert')
+    convert_parser.add_argument('--docs-dir', help='Directory containing the documents')
+    convert_parser.add_argument('--index', default='ldto-objects', help='Elasticsearch index name')
+    convert_parser.add_argument('--window-size', type=int, default=500, help='Size for max_inner_result_window')
+    
+    # Parser voor het update-window commando
+    window_parser = subparsers.add_parser('update-window', help='Update max_inner_result_window setting')
+    window_parser.add_argument('--index', default='ldto-objects', help='Elasticsearch index name')
+    window_parser.add_argument('--window-size', type=int, default=500, help='Size for max_inner_result_window')
+    
+    # Voeg positional arguments toe voor backward compatibility
+    parser.add_argument('ttl_file', nargs='?', help='Path to TTL file (legacy mode)')
+    parser.add_argument('--docs-dir', default='docs', help='Directory containing the documents (legacy mode)')
     
     args = parser.parse_args()
     
     es = create_elasticsearch_client()
     
-    if args.action == 'convert':
+    # Als er een ttl_file is opgegeven zonder action, gebruik legacy mode
+    if args.ttl_file and not args.action:
+        documents, dekking_types, scheme_labels = convert_ttl_to_es(args.ttl_file, args.docs_dir)
+        create_index(es, 'ldto-objects', dekking_types, scheme_labels)
+        index_documents(es, 'ldto-objects', documents)
+    # Anders gebruik de nieuwe command structuur
+    elif args.action == 'convert':
         if not args.file:
             parser.error("--file is required for convert action")
-        documents, dekking_types, scheme_labels = convert_ttl_to_es(args.file)
+        docs_dir = args.docs_dir if args.docs_dir else 'docs'
+        documents, dekking_types, scheme_labels = convert_ttl_to_es(args.file, docs_dir)
         create_index(es, args.index, dekking_types, scheme_labels, window_size=args.window_size)
         index_documents(es, args.index, documents)
     elif args.action == 'update-window':
