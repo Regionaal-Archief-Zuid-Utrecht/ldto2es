@@ -267,6 +267,7 @@ def create_index(es, index_name, dekking_types, scheme_labels, window_size=500):
         window_size: Size for max_inner_result_window (default: 100)
     """
     # Basic mapping for known fields
+
     mapping = {
         "settings": {
             "index": {
@@ -275,43 +276,82 @@ def create_index(es, index_name, dekking_types, scheme_labels, window_size=500):
         },
         "mappings": {
             "_source": {
-                "excludes": [
-                    "full_text"
-                ]
+                "excludes": ["full_text"]
             },
-            "dynamic": "true",  # Allow dynamic fields for event dates
-            "dynamic_templates": [
-                {
-                    "dates": {
-                        "match_pattern": "regex",
-                        "match": "^(created|modified|published|approved|received|sent|processed|archived|registered|completed|reviewed|validated).*",
-                        "mapping": {
-                            "type": "date"
-                        }
-                    }
-                }
-            ],
             "properties": {
                 "@id": {
-                    "type": "keyword"
+                        "type": "keyword"
                 },
                 "id": {"type": "keyword"},
                 "naam": {
                     "type": "text",
+                    "analyzer": "dutch",
                     "fields": {
                         "keyword": {"type": "keyword"}
                     }
                 },
-                "omschrijving": {"type": "text"},
-                "full_text": {"type": "text"},
-                "classificatie": {"type": "keyword"},
-                "classificatie_uri": {"type": "keyword"},
-                "archiefvormer": {"type": "keyword"},
-                "archiefvormer_uri": {"type": "keyword"},
-                "aggregatieniveau": {"type": "keyword"},
-                "aggregatieniveau_uri": {"type": "keyword"},
+                "omschrijving": {
+                    "type": "text",
+                    "analyzer": "dutch"
+                },
+                "classificatie": {
+                    "type": "text",
+                    "analyzer": "dutch",
+                    "fields": {
+                        "keyword": {"type": "keyword"}
+                    }
+                },
+                "archiefvormer": {
+                    "type": "text",
+                    "analyzer": "dutch",
+                    "fields": {
+                        "keyword": {"type": "keyword"}
+                    }
+                },
+                "aggregatieniveau": {
+                    "type": "text",
+                    "analyzer": "dutch",
+                    "fields": {
+                        "keyword": {"type": "keyword"}
+                    }
+                },
+                "archief": {
+                    "type": "text",
+                    "analyzer": "dutch",
+                    "fields": {
+                        "keyword": {"type": "keyword"}
+                    }
+                },
+                "full_text": {
+                    "type": "text",
+                    "analyzer": "dutch",
+                    "store": False,
+                    "index_options": "docs",
+                    "norms": True
+                },
                 "bestand_url": {"type": "keyword"},
-                "archief": {"type": "keyword"}
+                # Metadata fields - for search and faceting
+                "classificatie_uri": {
+                    "type": "keyword",
+                    "index": False
+                },
+                "archiefvormer_uri": {
+                    "type": "keyword",
+                    "index": False
+                },
+                "aggregatieniveau_uri": {
+                    "type": "keyword",
+                    "index": False
+                },
+                # Hierarchical relationships - not searchable
+                "bevat_onderdeel": {
+                    "type": "keyword",
+                    "index": False
+                },
+                "is_onderdeel_van": {
+                    "type": "keyword",
+                    "index": False
+                }
             }
         }
     }
