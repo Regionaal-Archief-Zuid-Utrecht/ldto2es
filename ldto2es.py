@@ -274,6 +274,11 @@ def create_index(es, index_name, dekking_types, scheme_labels, window_size=500):
             }
         },
         "mappings": {
+            "_source": {
+                "excludes": [
+                    "full_text"
+                ]
+            },
             "dynamic": "true",  # Allow dynamic fields for event dates
             "dynamic_templates": [
                 {

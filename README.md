@@ -17,6 +17,21 @@ ES_PORT=443
 
 Het script kan op twee manieren worden aangeroepen:
 
+### Index Optimalisatie en Privacy
+
+De index is geoptimaliseerd voor prestaties, opslagruimte en privacy/AVG-compliance:
+- Het `full_text` veld wordt uitgesloten van de `_source` om:
+  1. De index grootte te beperken
+  2. Privacy gevoelige informatie te beschermen (AVG/GDPR)
+  3. Te voorkomen dat de volledige documentinhoud wordt opgeslagen
+- De tekst blijft wel doorzoekbaar voor geautoriseerde gebruikers
+- Deze instelling is cruciaal en mag niet worden verwijderd
+
+Deze aanpak zorgt ervoor dat:
+- Documenten doorzoekbaar zijn voor gebruikers met de juiste rechten
+- De volledige documentinhoud alleen toegankelijk is via de originele bronbestanden
+- Er geen onnodige kopieën van mogelijk privacy-gevoelige informatie worden opgeslagen
+
 ### 1. Eenvoudige manier (Legacy mode)
 
 ```bash
