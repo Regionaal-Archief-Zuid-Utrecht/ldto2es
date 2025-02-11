@@ -349,8 +349,20 @@ def create_index(es, index_name, dekking_types, scheme_labels, window_size=500):
                     "index": False
                 },
                 "is_onderdeel_van": {
-                    "type": "keyword",
-                    "index": False
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "keyword"
+                        },
+                        "name": {
+                            "type": "text",
+                            "fields": {
+                                "keyword": {
+                                    "type": "keyword"
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -536,7 +548,7 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
     SELECT DISTINCT ?obj ?naam ?omschrijving ?classificatie ?archiefvormer ?aggregatieniveau 
            ?dekking ?dekkingType ?begin ?eind
            ?bestand ?bestandURL ?bestandNaam ?beperkingen
-           ?bevatOnderdeel ?isOnderdeelVan
+           ?bevatOnderdeel ?isOnderdeelVan ?isOnderdeelVanLabel
            ?betrokkene ?betrokkeneActor ?event ?eventType ?eventTijd
            (GROUP_CONCAT(?trefwoord; separator=',') as ?trefwoorden)
     WHERE {
@@ -558,7 +570,10 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
         }
         OPTIONAL { ?obj ldto:beperkingGebruik ?beperkingen }
         OPTIONAL { ?obj ldto:bevatOnderdeel ?bevatOnderdeel }
-        OPTIONAL { ?obj ldto:isOnderdeelVan ?isOnderdeelVan }
+        OPTIONAL { 
+            ?obj ldto:isOnderdeelVan ?isOnderdeelVan .
+            ?isOnderdeelVan ldto:naam ?isOnderdeelVanLabel
+        }
         OPTIONAL { ?obj ldto:trefwoord ?trefwoord }
         OPTIONAL { 
             ?obj ldto:betrokkene ?betrokkene .
@@ -573,7 +588,7 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
     GROUP BY ?obj ?naam ?omschrijving ?classificatie ?archiefvormer ?aggregatieniveau 
              ?dekking ?dekkingType ?begin ?eind
              ?bestand ?bestandURL ?bestandNaam ?beperkingen
-             ?bevatOnderdeel ?isOnderdeelVan
+             ?bevatOnderdeel ?isOnderdeelVan ?isOnderdeelVanLabel
              ?betrokkene ?betrokkeneActor ?event ?eventType ?eventTijd
     """
     
@@ -611,8 +626,14 @@ def convert_ttl_to_es(ttl_file, docs_dir='docs'):
         
         # Add hierarchical relationships if present
         process_relation_field(row, 'bevatOnderdeel', doc, 'bevat_onderdeel')
-        process_relation_field(row, 'isOnderdeelVan', doc, 'is_onderdeel_van')
-
+        
+        # Process isOnderdeelVan with both id and label
+        if row['isOnderdeelVan']:
+            doc['is_onderdeel_van'] = {
+                'id': str(row['isOnderdeelVan']),
+                'name': str(row['isOnderdeelVanLabel']) if row['isOnderdeelVanLabel'] else str(row['isOnderdeelVan'])
+            }
+        
         # Store document
         documents[doc['id']] = doc
 
